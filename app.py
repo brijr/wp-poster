@@ -8,6 +8,7 @@ from dotenv import load_dotenv
 import json
 import re
 import logging
+import sqlite3
 
 # Load environment variables
 load_dotenv()
@@ -53,17 +54,26 @@ def get_csv_columns(df: pd.DataFrame) -> List[str]:
     """Get column names from uploaded CSV."""
     return df.columns.tolist()
 
-def process_and_send_data(df: pd.DataFrame, field_mapping: Dict[str, str], post_type: str, wp_url: str, wp_username: str, wp_app_password: str, batch_size: int = 10) -> Tuple[int, int]:
-    """Process the CSV data and send it to WordPress."""
+def get_sqlite_columns(db_path: str, table_name: str) -> List[str]:
+    """Get column names from SQLite table."""
+    conn = sqlite3.connect(db_path)
+    cursor = conn.cursor()
+    cursor.execute(f"PRAGMA table_info({table_name})")
+    columns = [row[1] for row in cursor.fetchall()]
+    conn.close()
+    return columns
+
+def process_and_send_data(data: pd.DataFrame, field_mapping: Dict[str, str], post_type: str, wp_url: str, wp_username: str, wp_app_password: str, batch_size: int = 10) -> Tuple[int, int]:
+    """Process the data and send it to WordPress."""
     success_count = 0
     error_count = 0
     normalized_url = normalize_url(wp_url)
 
     progress_bar = st.progress(0)
-    total_rows = len(df)
+    total_rows = len(data)
 
-    for i in range(0, len(df), batch_size):
-        batch = df.iloc[i:i+batch_size]
+    for i in range(0, len(data), batch_size):
+        batch = data.iloc[i:i+batch_size]
         post_data = {wp_field: row[csv_field] for wp_field, csv_field in field_mapping.items() for _, row in batch.iterrows()}
 
         try:
@@ -121,7 +131,7 @@ def normalize_url(url: str) -> str:
     return url
 
 def main():
-    st.title("WordPress CSV Field Mapper")
+    st.title("WordPress CSV/SQLite Field Mapper")
 
     # Get WordPress credentials from environment variables
     wp_url = os.getenv("WORDPRESS_URL")
@@ -146,23 +156,45 @@ def main():
     if post_types:
         selected_post_type = st.selectbox("Select Post Type", list(post_types.keys()))
 
-        # File uploader
-        uploaded_file = st.file_uploader("Choose a CSV file", type="csv")
+        # Data source selection
+        data_source = st.radio("Select Data Source", ["CSV", "SQLite"])
 
-        if uploaded_file is not None:
-            df = pd.read_csv(uploaded_file)
-            csv_columns = get_csv_columns(df)
+        if data_source == "CSV":
+            # File uploader for CSV
+            uploaded_file = st.file_uploader("Choose a CSV file", type="csv")
+            if uploaded_file is not None:
+                df = pd.read_csv(uploaded_file)
+                columns = get_csv_columns(df)
+        else:
+            # File uploader for SQLite
+            uploaded_file = st.file_uploader("Choose a SQLite database file", type="db")
+            if uploaded_file is not None:
+                db_path = "temp_db.db"
+                with open(db_path, "wb") as f:
+                    f.write(uploaded_file.getbuffer())
 
+                # Get table names
+                conn = sqlite3.connect(db_path)
+                cursor = conn.cursor()
+                cursor.execute("SELECT name FROM sqlite_master WHERE type='table';")
+                tables = [row[0] for row in cursor.fetchall()]
+                conn.close()
+
+                selected_table = st.selectbox("Select Table", tables)
+                columns = get_sqlite_columns(db_path, selected_table)
+                df = pd.read_sql_query(f"SELECT * FROM {selected_table}", sqlite3.connect(db_path))
+
+        if 'df' in locals() and not df.empty:
             # Get fields for selected post type
             post_type_fields = get_post_type_fields(post_types[selected_post_type])
 
             # Field mapping
-            st.subheader("Map CSV columns to WordPress fields")
+            st.subheader("Map columns to WordPress fields")
             field_mapping = {}
-            for csv_column in csv_columns:
-                mapped_field = st.selectbox(f"Map CSV column '{csv_column}' to", [""] + post_type_fields, key=csv_column)
+            for column in columns:
+                mapped_field = st.selectbox(f"Map column '{column}' to", [""] + post_type_fields, key=column)
                 if mapped_field:
-                    field_mapping[mapped_field] = csv_column
+                    field_mapping[mapped_field] = column
 
             if st.button("Process and Send Data"):
                 if field_mapping:
@@ -175,13 +207,12 @@ def main():
             # Preview mapping
             if field_mapping:
                 st.subheader("Field Mapping Preview")
-                for wp_field, csv_column in field_mapping.items():
-                    st.write(f"WordPress '{wp_field}' <- CSV '{csv_column}'")
+                for wp_field, column in field_mapping.items():
+                    st.write(f"WordPress '{wp_field}' <- '{column}'")
 
             # Data preview
-            if not df.empty:
-                st.subheader("Data Preview")
-                st.dataframe(df.head())
+            st.subheader("Data Preview")
+            st.dataframe(df.head())
 
             if st.button("Save Mapping"):
                 save_mapping(field_mapping, "mapping.json")
