@@ -7,7 +7,6 @@ import os
 from dotenv import load_dotenv
 import json
 import re
-import logging
 import sqlite3
 
 # Load environment variables
